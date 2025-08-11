@@ -1,20 +1,24 @@
 name: Run tg_sender
 
 on:
-  workflow_dispatch:   # <--- вот этот триггер нужен для ручного запуска
+  workflow_dispatch:
   schedule:
-    - cron: "0 18 * * *"  # ежедневный запуск
+    - cron: "0 18 * * *"  # 21:00 МСК
 
 jobs:
   run_python:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
           python-version: '3.x'
-      - run: |
+
+      - name: Install dependencies
+        run: |
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - run: python ./tg_sender
 
-
+      - name: Run tg_sender script
+        run: python ./tg_sender
