@@ -1,0 +1,194 @@
+import pandas as pd
+import requests
+from io import StringIO
+from datetime import datetime, timedelta
+import time
+import html
+
+# Настройки API Ozon
+CLIENT_ID = "547260"  # Замени на свой Client-ID
+API_KEY = "b0f2a53a-6349-4a9d-9b09-85d22d73fa6f"  # Замени на свой Api-Key
+HEADERS = {
+    "Client-Id": CLIENT_ID,
+    "Api-Key": API_KEY,
+    "Content-Type": "application/json"
+}
+
+# Словарь себестоимости артикулов (за 1 единицу)
+COST_PER_UNIT = {
+    "Б-турмалин": 112.75,
+    "Б-гранат": 112.75,
+    "Ч_Турмалин": 203.83,
+    "Ч_гранат": 203.83,
+    "Ч-шпинель": 95.04,
+    "Б-шпинель": 66.13,
+    "Ч-хризопраз": 95.04,
+    "Б-хризопраз": 66.13,
+    "Ч-стекло-розовый": 95.04,
+    "Б-стекло-розовый": 66.13,
+    "Ч-стекло-шампань": 95.04,
+    "Б-стекло-шампань": 66.13,
+    "Ч-стекло-голубой": 95.04,
+    "Ч-стекло-серый": 95.04,
+    "Ч-стекло-фиолетовый": 95.04,
+    "Ч-стекло-зеленый": 95.04,
+    "Ч-лазурит": 184.91,
+    "Б-лазурит": 104.64,
+    "Ч-кварц": 184.91,
+    "Б-кварц": 104.64,
+    "Ч-циркон-зеленый": 184.91,
+    "Б-циркон-зеленый": 104.64,
+    "Ч-циркон-розовый": 184.91,
+    "Б-циркон-розовый": 104.64,
+    "Ч-циркон-белый": 184.91,
+    "Б-циркон-белый": 104.64,
+    "Ч-циркон-мультиколор": 184.91,
+    "Б-циркон-мультиколор": 104.64,
+    "Ч-циркон-черный": 184.91,
+    "Б-циркон-черный": 104.64
+}
+
+# Формируем даты
+today = datetime.now()
+yesterday = today - timedelta(days=1)
+two_months_ago = today - timedelta(days=62)
+
+processed_at_from = two_months_ago.strftime("%Y-%m-%dT00:00:00.000Z")
+processed_at_to = yesterday.strftime("%Y-%m-%dT23:59:59.999Z")
+yesterday_from = yesterday.strftime("%Y-%m-%dT00:00:00.000Z")
+yesterday_to = yesterday.strftime("%Y-%m-%dT23:59:59.999Z")
+
+# Создание отчёта по доставкам
+create_url = "https://api-seller.ozon.ru/v1/report/postings/create"
+create_payload = {
+    "filter": {
+        "processed_at_from": processed_at_from,
+        "processed_at_to": processed_at_to,
+        "delivery_schema": ["fbo"],
+        "sku": [],
+        "cancel_reason_id": [],
+        "offer_id": "",
+        "status_alias": [],
+        "statuses": [],
+        "title": ""
+    },
+    "language": "DEFAULT"
+}
+
+create_response = requests.post(create_url, json=create_payload, headers=HEADERS)
+create_response.raise_for_status()
+code = create_response.json()["result"]["code"]
+
+# Получение информации об отчёте
+info_url = "https://api-seller.ozon.ru/v1/report/info"
+info_payload = {"code": code}
+
+max_attempts = 10
+for attempt in range(max_attempts):
+    info_response = requests.post(info_url, json=info_payload, headers=HEADERS)
+    info_response.raise_for_status()
+    result = info_response.json()["result"]
+    if result["status"] == "success":
+        file_url = result["file"]
+        break
+    time.sleep(5)
+else:
+    raise Exception("Отчёт не был готов после всех попыток")
+
+# Загружаем файл
+response = requests.get(file_url)
+response.raise_for_status()
+
+# Читаем CSV
+df = pd.read_csv(StringIO(response.text), sep=';')
+
+# Преобразуем даты
+df["Дата доставки"] = pd.to_datetime(df["Дата доставки"], format="%Y-%m-%d %H:%M:%S", errors='coerce')
+
+
+def analyze_deliveries(date):
+    deliveries = df[df["Дата доставки"].dt.date == date.date()]
+    total_quantity = deliveries["Количество"].sum()
+    article_counts = deliveries.groupby("Артикул")["Количество"].sum()
+
+    total_cost = 0
+    for article, quantity in article_counts.items():
+        cost_per_unit = COST_PER_UNIT.get(article, 0)
+        total_cost += cost_per_unit * quantity
+
+    return total_cost, article_counts, total_quantity
+
+
+transaction_url = "https://api-seller.ozon.ru/v3/finance/transaction/totals"
+transaction_payload = {
+    "date": {
+        "from": yesterday_from,
+        "to": yesterday_to
+    },
+    "posting_number": "",
+    "transaction_type": "all"
+}
+
+transaction_response = requests.post(transaction_url, json=transaction_payload, headers=HEADERS)
+transaction_response.raise_for_status()
+transaction_data = transaction_response.json()["result"]
+
+total_cost, article_counts, total_quantity = analyze_deliveries(yesterday)
+
+table_data = {
+    "продажи и возвраты": transaction_data["accruals_for_sale"],
+    "комиссия Озон": transaction_data["sale_commission"],
+    "доставка": transaction_data["processing_and_delivery"],
+    "возвраты и отмены": transaction_data["refunds_and_cancellations"],
+    "услуги/реклама": transaction_data["services_amount"],
+    "компенсации": transaction_data["compensation_amount"],
+    "доставка по выбору продавца": transaction_data["money_transfer"],
+    "доп услуги": transaction_data["others_amount"],
+    "себестоимость товаров": total_cost
+}
+
+total_income = sum([table_data[key] for key in table_data if key != "себестоимость товаров"])
+margin = ((total_income - total_cost) / total_income) * 100 if total_income != 0 else 0
+table_data["итоговая маржа"] = f"{margin:.2f}%"
+
+def escape_html(text):
+    return html.escape(str(text))
+
+lines = []
+lines.append(f"Финансовые итоги за {yesterday.strftime('%d.%m.%Y')}\n")
+lines.append("🛒 <b>Количество доставленных товаров по артикулам:</b>")
+for article, qty in article_counts.items():
+    # Только 💎 перед названием товара, без 🟢/🔴
+    lines.append(f"💎 {escape_html(article)}:\n{int(qty)}")
+
+lines.append("")  # пробел между блоками
+lines.append("📊Финансовый результат")
+
+for key, value in table_data.items():
+    if key == "итоговая маржа":
+        # перед маржой 📈
+        lines.append(f"📈 <b>{escape_html(key)}:</b>\n{value}")
+    else:
+        # эмоджи 🟢 если >0 иначе 🔴
+        emoji = "🟢" if value > 0 else "🔴"
+        lines.append(f"{emoji} {escape_html(key)}:\n{float(value):.2f}")
+
+output_text = "\n".join(lines)
+
+print("\n" + output_text)
+
+TELEGRAM_BOT_TOKEN = "8291396629:AAHvYEVFXFBHf43GXUErVrV6cyDj3vgRk3A"
+TELEGRAM_CHAT_ID = "-4970647647"
+
+telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+params = {
+    "chat_id": TELEGRAM_CHAT_ID,
+    "text": output_text,
+    "parse_mode": "HTML"
+}
+
+response = requests.post(telegram_url, params=params)
+if response.status_code == 200:
+    print("Сообщение успешно отправлено в Telegram!")
+else:
+    print(f"Ошибка отправки в Telegram: {response.text}")
