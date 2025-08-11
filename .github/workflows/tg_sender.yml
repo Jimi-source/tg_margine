@@ -3,7 +3,7 @@ name: Run tg_sender
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 18 * * *"  # каждый день в 21:30 МСК
+    - cron: "30 19 * * *"  # каждый день в 22:30 МСК
 
 jobs:
   run_python:
