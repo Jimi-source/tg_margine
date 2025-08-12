@@ -3,11 +3,10 @@ import requests
 from io import StringIO
 from datetime import datetime, timedelta
 import time
-import html
 
 # Настройки API Ozon
-CLIENT_ID = "547260"  # Замени на свой Client-ID
-API_KEY = "b0f2a53a-6349-4a9d-9b09-85d22d73fa6f"  # Замени на свой Api-Key
+CLIENT_ID = "547260"
+API_KEY = "b0f2a53a-6349-4a9d-9b09-85d22d73fa6f"
 HEADERS = {
     "Client-Id": CLIENT_ID,
     "Api-Key": API_KEY,
@@ -16,36 +15,36 @@ HEADERS = {
 
 # Словарь себестоимости артикулов (за 1 единицу)
 COST_PER_UNIT = {
-    "Б-турмалин": 112.75,
-    "Б-гранат": 112.75,
-    "Ч_Турмалин": 203.83,
-    "Ч_гранат": 203.83,
-    "Ч-шпинель": 95.04,
-    "Б-шпинель": 66.13,
-    "Ч-хризопраз": 95.04,
-    "Б-хризопраз": 66.13,
-    "Ч-стекло-розовый": 95.04,
-    "Б-стекло-розовый": 66.13,
-    "Ч-стекло-шампань": 95.04,
-    "Б-стекло-шампань": 66.13,
-    "Ч-стекло-голубой": 95.04,
-    "Ч-стекло-серый": 95.04,
-    "Ч-стекло-фиолетовый": 95.04,
-    "Ч-стекло-зеленый": 95.04,
-    "Ч-лазурит": 184.91,
-    "Б-лазурит": 104.64,
-    "Ч-кварц": 184.91,
-    "Б-кварц": 104.64,
-    "Ч-циркон-зеленый": 184.91,
-    "Б-циркон-зеленый": 104.64,
-    "Ч-циркон-розовый": 184.91,
-    "Б-циркон-розовый": 104.64,
-    "Ч-циркон-белый": 184.91,
-    "Б-циркон-белый": 104.64,
-    "Ч-циркон-мультиколор": 184.91,
-    "Б-циркон-мультиколор": 104.64,
-    "Ч-циркон-черный": 184.91,
-    "Б-циркон-черный": 104.64
+    "Б-турмалин": 96.08,
+    "Б-гранат": 96.08,
+    "Ч_Турмалин": 187.16,
+    "Ч_гранат": 187.16,
+    "Ч-шпинель": 73.65,
+    "Б-шпинель": 47.43,
+    "Ч-хризопраз": 73.65,
+    "Б-хризопраз": 47.43,
+    "Ч-стекло-розовый": 73.65,
+    "Б-стекло-розовый": 47.43,
+    "Ч-стекло-шампань": 73.65,
+    "Б-стекло-шампань": 47.43,
+    "Ч-стекло-голубой": 73.65,
+    "Ч-стекло-серый": 73.65,
+    "Ч-стекло-фиолетовый": 73.65,
+    "Ч-стекло-зеленый": 73.65,
+    "Ч-лазурит": 168.24,
+    "Б-лазурит": 87.97,
+    "Ч-кварц": 168.24,
+    "Б-кварц": 87.97,
+    "Ч-циркон-зеленый": 168.24,
+    "Б-циркон-зеленый": 87.97,
+    "Ч-циркон-розовый": 168.24,
+    "Б-циркон-розовый": 87.97,
+    "Ч-циркон-белый": 168.24,
+    "Б-циркон-белый": 87.97,
+    "Ч-циркон-мультиколор": 168.24,
+    "Б-циркон-мультиколор": 87.97,
+    "Ч-циркон-черный": 168.24,
+    "Б-циркон-черный": 87.97
 }
 
 # Формируем даты
@@ -105,20 +104,21 @@ df = pd.read_csv(StringIO(response.text), sep=';')
 # Преобразуем даты
 df["Дата доставки"] = pd.to_datetime(df["Дата доставки"], format="%Y-%m-%d %H:%M:%S", errors='coerce')
 
-
+# Функция для анализа доставок за заданную дату
 def analyze_deliveries(date):
     deliveries = df[df["Дата доставки"].dt.date == date.date()]
     total_quantity = deliveries["Количество"].sum()
     article_counts = deliveries.groupby("Артикул")["Количество"].sum()
 
+    # Подсчёт общей себестоимости
     total_cost = 0
     for article, quantity in article_counts.items():
         cost_per_unit = COST_PER_UNIT.get(article, 0)
         total_cost += cost_per_unit * quantity
 
-    return total_cost, article_counts, total_quantity
+    return article_counts, total_cost
 
-
+# Получение транзакций за вчера
 transaction_url = "https://api-seller.ozon.ru/v3/finance/transaction/totals"
 transaction_payload = {
     "date": {
@@ -133,8 +133,10 @@ transaction_response = requests.post(transaction_url, json=transaction_payload, 
 transaction_response.raise_for_status()
 transaction_data = transaction_response.json()["result"]
 
-total_cost, article_counts, total_quantity = analyze_deliveries(yesterday)
+# Анализ доставок за вчера
+article_counts, total_cost = analyze_deliveries(yesterday)
 
+# Подготовка данных
 table_data = {
     "продажи и возвраты": transaction_data["accruals_for_sale"],
     "комиссия Озон": transaction_data["sale_commission"],
@@ -147,44 +149,47 @@ table_data = {
     "себестоимость товаров": total_cost
 }
 
+# Расчёт итоговой маржи
 total_income = sum([table_data[key] for key in table_data if key != "себестоимость товаров"])
 margin = ((total_income - total_cost) / total_income) * 100 if total_income != 0 else 0
 table_data["итоговая маржа"] = f"{margin:.2f}%"
 
-def escape_html(text):
-    return html.escape(str(text))
+# Базовое значение для процентов
+base_value = table_data["продажи и возвраты"] if table_data["продажи и возвраты"] != 0 else 1
 
-lines = []
-lines.append(f"Финансовые итоги за {yesterday.strftime('%d.%m.%Y')}\n")
-lines.append("🛒 <b>Количество доставленных товаров по артикулам:</b>")
-for article, qty in article_counts.items():
-    # Только 💎 перед названием товара, без 🟢/🔴
-    lines.append(f"💎 {escape_html(article)}:\n{int(qty)}")
+# Формируем текст для Telegram
+output_lines = []
+output_lines.append(f"Финансовые итоги за {yesterday.strftime('%d.%m.%Y')}")
 
-lines.append("")  # пробел между блоками
-lines.append("📊Финансовый результат")
+# Список доставленных товаров
+output_lines.append("🛒 количество доставленных товаров по артикулам")
+for article, count in article_counts.items():
+    output_lines.append(f"💎 {article}: {count}")
 
+# Финансовый результат
+output_lines.append("")
+output_lines.append("📊 Финансовый результат")
 for key, value in table_data.items():
     if key == "итоговая маржа":
-        # перед маржой 📈
-        lines.append(f"📈 <b>{escape_html(key)}:</b>\n{value}")
+        output_lines.append(f"📈 {key}: {value}")
     else:
-        # эмоджи 🟢 если >0 иначе 🔴
         emoji = "🟢" if value > 0 else "🔴"
-        lines.append(f"{emoji} {escape_html(key)}:\n{float(value):.2f}")
+        percent = (value / base_value) * 100
+        output_lines.append(f"{emoji} {key}:\n{value:.2f} ({percent:.2f}%)")
 
-output_text = "\n".join(lines)
+# Соединяем всё в один текст
+output_text = "\n".join(output_lines)
 
-print("\n" + output_text)
-
+# Настройки Telegram Bot
 TELEGRAM_BOT_TOKEN = "7976964368:AAEN5XGC8IuoQ2ajpHCvxmBd0zozhHefa7A"
 TELEGRAM_CHAT_ID = "-1002830424580"
 
+# Отправка в Telegram
 telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 params = {
     "chat_id": TELEGRAM_CHAT_ID,
     "text": output_text,
-    "parse_mode": "HTML"
+    "parse_mode": "HTML"  # HTML вместо Markdown для безопасности
 }
 
 response = requests.post(telegram_url, params=params)
