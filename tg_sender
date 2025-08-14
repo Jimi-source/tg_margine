@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import time
 import html
 
-# ========== Настройки (замени своими значениями) ==========
+# ========== Настройки ==========
 CLIENT_ID = "547260"
 API_KEY = "b0f2a53a-6349-4a9d-9b09-85d22d73fa6f"
 HEADERS = {
@@ -56,7 +56,7 @@ def chunks(lst, n):
 def escape(text):
     return html.escape(str(text))
 
-# ========== Даты и создание отчёта (OZON) ==========
+# ========== Даты ==========
 today = datetime.now()
 yesterday = today - timedelta(days=1)
 two_months_ago = today - timedelta(days=62)
@@ -66,6 +66,7 @@ processed_at_to = yesterday.strftime("%Y-%m-%dT23:59:59.999Z")
 yesterday_from = yesterday.strftime("%Y-%m-%dT00:00:00.000Z")
 yesterday_to = yesterday.strftime("%Y-%m-%dT23:59:59.999Z")
 
+# ========== Создание отчёта ==========
 create_url = "https://api-seller.ozon.ru/v1/report/postings/create"
 create_payload = {
     "filter": {
@@ -84,91 +85,60 @@ if not code:
 
 info_url = "https://api-seller.ozon.ru/v1/report/info"
 file_url = None
-max_attempts = 20
-for attempt in range(max_attempts):
+for _ in range(20):
     info_resp = requests.post(info_url, json={"code": code}, headers=HEADERS)
     info_resp.raise_for_status()
     info_result = info_resp.json().get("result", {})
-    status = info_result.get("status")
-    # debug: print("report status:", status)
-    if status == "success":
+    if info_result.get("status") == "success":
         file_url = info_result.get("file")
         break
     time.sleep(5)
 if not file_url:
     raise SystemExit("Отчёт не был готов после всех попыток")
 
-# ========== Чтение CSV отчёта ==========
+# ========== Чтение CSV ==========
 csv_text = requests.get(file_url).text
 df = pd.read_csv(StringIO(csv_text), sep=';')
-df["Дата доставки"] = pd.to_datetime(df.get("Дата доставки"), format="%Y-%m-%d %H:%M:%S", errors='coerce')
+df["Дата доставки"] = pd.to_datetime(df.get("Дата доставки"), errors='coerce')
 
 # ========== Анализ доставок ==========
 deliveries = df[df["Дата доставки"].dt.date == yesterday.date()]
-if deliveries.empty:
-    article_counts = pd.Series(dtype=int)
-else:
-    article_counts = deliveries.groupby("Артикул")["Количество"].sum()  # Series: index=Артикул, value=count
+article_counts = deliveries.groupby("Артикул")["Количество"].sum() if not deliveries.empty else pd.Series(dtype=int)
 
-total_cost = 0.0
-for article, qty in article_counts.items():
-    total_cost += COST_PER_UNIT.get(article, 0) * qty
+total_cost = sum(COST_PER_UNIT.get(article, 0) * qty for article, qty in article_counts.items())
 
-# ========== Остатки (stock_on_warehouses) ==========
+# ========== Остатки ==========
 stock_url = "https://api-seller.ozon.ru/v2/analytics/stock_on_warehouses"
-stock_payload = {"limit": 1000, "offset": 0, "warehouse_type": "ALL"}
-stock_resp = requests.post(stock_url, json=stock_payload, headers=HEADERS)
+stock_resp = requests.post(stock_url, json={"limit": 1000, "offset": 0, "warehouse_type": "ALL"}, headers=HEADERS)
 stock_resp.raise_for_status()
 stock_rows = stock_resp.json().get("result", {}).get("rows", [])
 
-# суммируем по SKU (ключ — int sku)
-stock_totals = {}       # sku -> free_to_sell sum
-promised_totals = {}    # sku -> promised_amount sum
+stock_totals, promised_totals = {}, {}
 for r in stock_rows:
     sku = r.get("sku")
     if sku is None:
         continue
-    free = r.get("free_to_sell_amount", 0) or 0
-    promised = r.get("promised_amount", 0) or 0
-    stock_totals[sku] = stock_totals.get(sku, 0) + free
-    promised_totals[sku] = promised_totals.get(sku, 0) + promised
+    stock_totals[sku] = stock_totals.get(sku, 0) + (r.get("free_to_sell_amount") or 0)
+    promised_totals[sku] = promised_totals.get(sku, 0) + (r.get("promised_amount") or 0)
 
-# ========== Получение ads и idc из turnover/stocks пакетно ==========
+# ========== Turnover/stocks ==========
 turnover_url = "https://api-seller.ozon.ru/v1/analytics/turnover/stocks"
-# делаем список SKU, только для артикулов, которые есть в article_counts (чтобы меньше запросов)
-needed_skus = []
-for art in article_counts.index:
-    sku = ARTICLE_SKU_MAP.get(art)
-    if sku:
-        needed_skus.append(sku)
-
-ads_by_sku = {}
-idc_by_sku = {}
-# если нет нужных SKU — оставим пустыми
-if needed_skus:
-    for chunk in chunks(needed_skus, 50):
-        payload = {"limit": len(chunk), "offset": 0, "sku": chunk}
-        r = requests.post(turnover_url, json=payload, headers=HEADERS)
-        r.raise_for_status()
-        j = r.json()
-        # API может возвращать items либо в корне, либо в result
-        items = j.get("items") or j.get("result", {}).get("items") or []
-        for it in items:
-            sku = it.get("sku")
-            if sku is None:
-                continue
-            ads_by_sku[sku] = it.get("ads", 0) or 0
-            idc_by_sku[sku] = it.get("idc", 0) or 0
-        time.sleep(0.2)  # легкая пауза между пакетами
+needed_skus = [ARTICLE_SKU_MAP[art] for art in article_counts.index if art in ARTICLE_SKU_MAP]
+ads_by_sku, idc_by_sku = {}, {}
+for chunk in chunks(needed_skus, 50):
+    r = requests.post(turnover_url, json={"limit": len(chunk), "offset": 0, "sku": chunk}, headers=HEADERS)
+    r.raise_for_status()
+    for it in (r.json().get("items") or r.json().get("result", {}).get("items") or []):
+        sku = it.get("sku")
+        if sku is None:
+            continue
+        ads_by_sku[sku] = it.get("ads", 0) or 0
+        idc_by_sku[sku] = it.get("idc", 0) or 0
+    time.sleep(0.2)
 
 # ========== Финансовые транзакции ==========
 transaction_url = "https://api-seller.ozon.ru/v3/finance/transaction/totals"
-transaction_payload = {
-    "date": {"from": yesterday_from, "to": yesterday_to},
-    "posting_number": "",
-    "transaction_type": "all"
-}
-trans_resp = requests.post(transaction_url, json=transaction_payload, headers=HEADERS)
+trans_resp = requests.post(transaction_url, json={"date": {"from": yesterday_from, "to": yesterday_to}, "posting_number": "", "transaction_type": "all"}, headers=HEADERS)
 trans_resp.raise_for_status()
 transaction_data = trans_resp.json().get("result", {})
 
@@ -181,65 +151,42 @@ table_data = {
     "компенсации": transaction_data.get("compensation_amount", 0) or 0,
     "доставка по выбору продавца": transaction_data.get("money_transfer", 0) or 0,
     "доп услуги": transaction_data.get("others_amount", 0) or 0,
-    "себестоимость товаров": total_cost
+    "себестоимость товаров": -total_cost
 }
+
+net_profit = (
+    table_data["продажи и возвраты"]
+    + table_data["комиссия Озон"]
+    + table_data["доставка"]
+    + table_data["возвраты и отмены"]
+    + table_data["услуги/реклама"]
+    + table_data["компенсации"]
+    + table_data["доставка по выбору продавца"]
+    + table_data["доп услуги"]
+    + table_data["себестоимость товаров"]
+)
 total_income = sum(v for k, v in table_data.items() if k != "себестоимость товаров")
-table_data["итоговая маржа"] = f"{((total_income - total_cost) / total_income) * 100:.2f}%" if total_income else "0%"
+margin_percent = (net_profit / total_income) * 100 if total_income else 0
+table_data["итоговая маржа"] = f"{net_profit:.2f} ({margin_percent:.2f}%)"
 
 # ========== Формирование сообщения ==========
-lines = []
-lines.append(f"<b>Финансовые итоги за {yesterday.strftime('%d.%m.%Y')}</b>")
-lines.append("")  # пустая строка между секциями
-lines.append("<u>🛒 Количество доставленных товаров по артикулам:</u>")
-
-# Собираем список айтемов и сортируем по idc
+lines = [f"<b>Финансовые итоги за {yesterday.strftime('%d.%m.%Y')}</b>", "", "<u>🛒 Количество доставленных товаров по артикулам:</u>"]
 items = []
 for article, qty in article_counts.items():
     sku = ARTICLE_SKU_MAP.get(article)
     if sku is None:
-        # если маппинга нет — добавим с маркером отсутствия SKU
-        items.append({
-            "article": article,
-            "qty": int(qty),
-            "sku": None,
-            "idc": float('inf'),
-            "free": 0,
-            "promised": 0,
-            "ads": 0,
-            "missing_sku": True
-        })
+        items.append({"article": article, "qty": int(qty), "sku": None, "idc": float('inf'), "free": 0, "promised": 0, "ads": 0, "missing_sku": True})
         continue
+    items.append({"article": article, "qty": int(qty), "sku": sku, "idc": idc_by_sku.get(sku, float('inf')), "free": stock_totals.get(sku, 0), "promised": promised_totals.get(sku, 0), "ads": ads_by_sku.get(sku, 0), "missing_sku": False})
+items.sort(key=lambda x: x["idc"] if x["idc"] is not None else float('inf'))
 
-    free = stock_totals.get(sku, 0)
-    promised = promised_totals.get(sku, 0)
-    ads = ads_by_sku.get(sku, 0)
-    idc = idc_by_sku.get(sku, 0)
-
-    items.append({
-        "article": article,
-        "qty": int(qty),
-        "sku": sku,
-        "idc": idc if idc is not None else float('inf'),
-        "free": free,
-        "promised": promised,
-        "ads": ads,
-        "missing_sku": False
-    })
-
-# сортируем по idc (меньшее значение — вперед)
-items.sort(key=lambda x: (x["idc"] if x["idc"] is not None else float('inf')))
-
-# Добавляем в lines в отсортированном порядке
 for it in items:
     if it["missing_sku"]:
         lines.append(f"💎 {escape(it['article'])}: {it['qty']} (маркировка SKU не найдена)")
     else:
-        lines.append(
-            f"💎 {escape(it['article'])}: {it['qty']} "
-            f"(<b>{int(it['idc'])} дней до 0</b>; остатки: {int(it['free'])}; в пути: {int(it['promised'])}; продажи: {it['ads']:.2f})"
-        )
+        lines.append(f"💎 {escape(it['article'])}: {it['qty']} (<b>{int(it['idc'])} дней до 0</b>; остатки: {int(it['free'])}; в пути: {int(it['promised'])}; продажи: {it['ads']:.2f})")
 
-lines.append("")  # пустая строка между секциями
+lines.append("")
 lines.append("<u>📊 Финансовый результат:</u>")
 base = table_data.get("продажи и возвраты", 0) or 1
 for key, val in table_data.items():
@@ -254,9 +201,5 @@ output_text = "\n".join(lines)
 
 # ========== Отправка в Telegram ==========
 send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-params = {"chat_id": TELEGRAM_CHAT_ID, "text": output_text, "parse_mode": "HTML"}
-resp = requests.post(send_url, params=params)
-if resp.status_code == 200:
-    print("Сообщение успешно отправлено в Telegram")
-else:
-    print("Ошибка при отправке в Telegram:", resp.status_code, resp.text)
+resp = requests.post(send_url, params={"chat_id": TELEGRAM_CHAT_ID, "text": output_text, "parse_mode": "HTML"})
+print("Сообщение успешно отправлено в Telegram" if resp.status_code == 200 else f"Ошибка при отправке в Telegram: {resp.status_code} {resp.text}")
